@@ -114,9 +114,8 @@ def run_workflow(query, data_retriever):
     # Append user message to chat history
     chat_history.append(
         HumanMessage(
-            content=query,
-            isFileUploaded=isFileUploaded,
-            retriever=data_retriever,
+            content=query
+            + ("\n(The user has uploaded a file; use user_file_retriever_tool.)" if isFileUploaded else ""),
         )
     )
     try:

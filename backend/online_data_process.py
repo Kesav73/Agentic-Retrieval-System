@@ -1,12 +1,13 @@
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 
 db = None
 
-def create_retriever_from_pdf(filepath, embeddings=OpenAIEmbeddings()):
+def create_retriever_from_pdf(filepath, embeddings=None):
     """Creates a retriever tool from a PDF file."""
+    embeddings = embeddings or OpenAIEmbeddings()
     try:
         # 1. Load the PDF file
         loader = PyPDFLoader(filepath)

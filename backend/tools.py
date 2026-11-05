@@ -1,5 +1,5 @@
-from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain_community.tools import DuckDuckGoSearchRun, DuckDuckGoSearchResults
+from langchain_tavily import TavilySearch
+from langchain_community.tools import DuckDuckGoSearchResults
 from langchain_core.tools import tool
 from langchain_experimental.utilities import PythonREPL
 import operator
@@ -8,7 +8,9 @@ from typing_extensions import TypedDict
 from langgraph.prebuilt import ToolNode
 import os
 import datetime
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+import json
+import shutil
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
@@ -30,32 +32,68 @@ We are defining some tools
 We will also define some more tools that our agents will use in the future
 """
 
-tavily_tool = TavilySearchResults(max_results=5)
+tavily_tool = TavilySearch(max_results=5)
 repl = (
     PythonREPL()
 )  # Warning: This executes code locally, which can be unsafe when not sandboxed
 
-search = DuckDuckGoSearchResults(output_format="list")
-# print(search.invoke("last week sensex closing price"))
 
 # Default vector database
-def create_vector_db(embeddings=OpenAIEmbeddings()):
+DEFAULT_FILES_DIR = "./default_files"
+DEFAULT_DB_DIR = "./default_vector_db"
+MANIFEST_PATH = os.path.join(DEFAULT_DB_DIR, "manifest.json")
+
+
+def _default_files_manifest():
+    """Fingerprint (name, size, mtime) of every PDF in ./default_files."""
+    if not os.path.isdir(DEFAULT_FILES_DIR):
+        return {}
+    manifest = {}
+    for name in sorted(os.listdir(DEFAULT_FILES_DIR)):
+        if name.lower().endswith(".pdf"):
+            st = os.stat(os.path.join(DEFAULT_FILES_DIR, name))
+            manifest[name] = [st.st_size, int(st.st_mtime)]
+    return manifest
+
+
+def sync_default_vector_db(embeddings=None):
+    """Keep the default knowledge base in sync with ./default_files.
+
+    Replaces the old Pathway VectorStoreServer: instead of a separate streaming
+    server watching a folder, the FAISS index is rebuilt whenever a PDF in
+    ./default_files is added, removed or modified (checked on startup and before
+    each retrieve_documents call).
+    """
+    manifest = _default_files_manifest()
     try:
-        # 1. Load the PDF file
-        for files in os.listdir("./default_files"):
-            if files.endswith(".pdf"):
-                loader = PyPDFLoader(files)
-                documents = loader.load()
+        with open(MANIFEST_PATH) as f:
+            if json.load(f) == manifest and manifest:
+                return
+    except (OSError, ValueError):
+        pass
+
+    if not manifest:
+        if os.path.isdir(DEFAULT_DB_DIR):
+            shutil.rmtree(DEFAULT_DB_DIR)
+        return
+
+    try:
+        print(f"Indexing {len(manifest)} PDF(s) from {DEFAULT_FILES_DIR}...")
+        documents = []
+        for name in manifest:
+            documents.extend(PyPDFLoader(os.path.join(DEFAULT_FILES_DIR, name)).load())
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         docs = text_splitter.split_documents(documents)
-        db = FAISS.from_documents(docs, embeddings)
-        db.save_local("./default_vector_db")
-                
+        db = FAISS.from_documents(docs, embeddings or OpenAIEmbeddings())
+        db.save_local(DEFAULT_DB_DIR)
+        with open(MANIFEST_PATH, "w") as f:
+            json.dump(manifest, f)
+        print(f"Default knowledge base ready ({len(docs)} chunks).")
     except Exception as e:
-        print(f"Error loading PDF file: {e}")
-        return None
+        print(f"Error building default vector DB: {e}")
 
-create_vector_db()
+
+sync_default_vector_db()
 
 
 @tool
@@ -136,9 +174,13 @@ def python_repl(
 @tool
 def retrieve_documents(query: str):
     """Searches for documents related to a given query."""
+    sync_default_vector_db()
     try:
+        db_dir = DEFAULT_DB_DIR if os.path.isdir(DEFAULT_DB_DIR) else "./vector_db"
+        if not os.path.isdir(db_dir):
+            return "No document database is available yet."
         db = FAISS.load_local(
-            "./vector_db", OpenAIEmbeddings(), allow_dangerous_deserialization=True
+            db_dir, OpenAIEmbeddings(), allow_dangerous_deserialization=True
         )
         retriever = db.as_retriever()        
         if retriever is None:
@@ -155,6 +197,8 @@ def retrieve_documents(query: str):
 @tool
 def user_file_retriever_tool(query: str):
     """Searches for documents related to a given query on a user file."""
+    if not os.path.isdir("./vector_db"):
+        return "No user file has been uploaded yet."
     db = FAISS.load_local("./vector_db", OpenAIEmbeddings(), allow_dangerous_deserialization=True)
     retriever = db.as_retriever()    
     if retriever is None:
